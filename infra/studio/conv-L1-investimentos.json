@@ -1,0 +1,212 @@
+{
+  "description": "nested-flows CONV L1 · Investimentos (owner: BU Investimentos). Scenario B. Entered by replay after L0's /call. mode=entry → menu; mode=return (L2 came back) → ask whether to continue, then /return to L0. Each call/return ENDS this execution — re-entry is explicit.",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingMessage" },
+        { "event": "incomingCall" },
+        { "event": "incomingConversationMessage", "next": "get_frame" },
+        { "event": "incomingRequest" },
+        { "event": "incomingParent" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+    {
+      "name": "get_frame",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success", "next": "split_mode" },
+        { "event": "fail", "next": "menu_l1" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 200 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${FRAME_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/frame",
+        "parameters": [{ "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" }]
+      }
+    },
+    {
+      "name": "split_mode",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "menu_l1" },
+        {
+          "event": "match",
+          "next": "ask_more",
+          "conditions": [
+            { "friendly_name": "return", "arguments": ["{{widgets.get_frame.parsed.mode}}"], "type": "equal_to", "value": "return" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.get_frame.parsed.mode}}", "offset": { "x": 0, "y": 400 } }
+    },
+    {
+      "name": "menu_l1",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "split_l1" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": 300, "y": 620 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L1 · Investimentos · conv] Chamado por {{widgets.get_frame.parsed.parent}} · profundidade {{widgets.get_frame.parsed.depth}} · canal={{widgets.get_frame.parsed.args.canal}}\nQual produto?\n1 - Renda fixa\n2 - Fundos (indisponível)\n0 - Voltar",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "split_l1",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "menu_l1" },
+        {
+          "event": "match",
+          "next": "call_l2",
+          "conditions": [
+            { "friendly_name": "1 renda fixa", "arguments": ["{{widgets.menu_l1.inbound.Body | strip}}"], "type": "equal_to", "value": "1" }
+          ]
+        },
+        {
+          "event": "match",
+          "next": "return_back",
+          "conditions": [
+            { "friendly_name": "0 voltar", "arguments": ["{{widgets.menu_l1.inbound.Body | strip}}"], "type": "equal_to", "value": "0" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.menu_l1.inbound.Body | strip}}", "offset": { "x": 300, "y": 840 } }
+    },
+    {
+      "name": "call_l2",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success" },
+        { "event": "fail", "next": "return_fail" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${CALL_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/call",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "child", "value": "${CONV_L2_FLOW_SID}" },
+          { "key": "caller", "value": "{{flow.flow_sid}}" },
+          { "key": "arg_canal", "value": "{{widgets.get_frame.parsed.args.canal}}" },
+          { "key": "arg_produto", "value": "renda_fixa" }
+        ]
+      }
+    },
+    {
+      "name": "ask_more",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "split_more" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": -300, "y": 620 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L1 · Investimentos · conv] Renda fixa retornou: {{widgets.get_frame.parsed.result}} (profundidade agora {{widgets.get_frame.parsed.depth}}). Quer consultar outro produto? (sim/não)",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "split_more",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "return_done" },
+        {
+          "event": "match",
+          "next": "menu_l1",
+          "conditions": [
+            { "friendly_name": "sim", "arguments": ["{{widgets.ask_more.inbound.Body | downcase | strip}}"], "type": "equal_to", "value": "sim" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.ask_more.inbound.Body | downcase | strip}}", "offset": { "x": -300, "y": 840 } }
+    },
+    {
+      "name": "return_done",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": -300, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "{{widgets.get_frame.parsed.result}}" },
+          { "key": "produto", "value": "{{widgets.get_frame.parsed.produto}}" },
+          { "key": "via", "value": "L1" }
+        ]
+      }
+    },
+    {
+      "name": "return_back",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 600, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "voltou_de_L1" },
+          { "key": "via", "value": "L1" }
+        ]
+      }
+    },
+    {
+      "name": "return_timeout",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 900, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "timeout_L1" },
+          { "key": "via", "value": "L1" }
+        ]
+      }
+    },
+    {
+      "name": "return_fail",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 1200, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "fail_L1" },
+          { "key": "via", "value": "L1" }
+        ]
+      }
+    }
+  ]
+}

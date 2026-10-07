@@ -1,0 +1,11 @@
+.env
+node_modules/
+dist/
+*.log
+.DS_Store
+# rendered flow definitions (derived from infra/studio/*.json + .env)
+infra/studio/rendered/
+# twilio-run
+serverless/.env
+serverless/.twiliodeployinfo
+serverless/.twilio-functions

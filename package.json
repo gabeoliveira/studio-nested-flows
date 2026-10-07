@@ -1,0 +1,26 @@
+{
+  "name": "studio-nested-flows",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "POC: 3+ levels of Studio Flow nesting (beyond the 1-level Run Subflow limit) via TwiML Redirect + FlowEvent=return, with a Sync-backed call stack owned by Twilio Functions. Layered bot orchestration where different teams own different layers.",
+  "scripts": {
+    "provision": "tsx scripts/provision.ts",
+    "teardown": "tsx scripts/teardown.ts",
+    "reset": "tsx scripts/reset.ts",
+    "stack": "tsx scripts/stack.ts",
+    "trace": "tsx scripts/trace.ts",
+    "validate-flows": "tsx scripts/validate-flows.ts",
+    "serverless:deploy": "npm --prefix serverless run deploy",
+    "typecheck": "tsc --noEmit",
+    "latency": "tsx scripts/latency.ts"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

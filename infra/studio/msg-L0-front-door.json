@@ -1,0 +1,158 @@
+{
+  "description": "nested-flows L0 · Front door (owner: Canais). Entry flow for every message. Calls L1 (Investimentos) through /call and resumes on FlowEvent=return. Never edits L1 — it only knows L1's SID.",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingMessage", "next": "menu_l0" },
+        { "event": "incomingCall" },
+        { "event": "incomingConversationMessage" },
+        { "event": "incomingRequest" },
+        { "event": "incomingParent" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+    {
+      "name": "menu_l0",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "split_l0" },
+        { "event": "timeout", "next": "send_l0_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 200 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L0 · Canais] Olá! Sou o assistente virtual do banco. O que você precisa?\n1 - Investimentos\n2 - Cartão\n0 - Encerrar",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "split_l0",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "send_l0_invalid" },
+        {
+          "event": "match",
+          "next": "call_l1",
+          "conditions": [
+            { "friendly_name": "1 investimentos", "arguments": ["{{widgets.menu_l0.inbound.Body | strip}}"], "type": "equal_to", "value": "1" }
+          ]
+        },
+        {
+          "event": "match",
+          "next": "send_l0_unavailable",
+          "conditions": [
+            { "friendly_name": "2 cartao", "arguments": ["{{widgets.menu_l0.inbound.Body | strip}}"], "type": "equal_to", "value": "2" }
+          ]
+        },
+        {
+          "event": "match",
+          "next": "send_l0_bye",
+          "conditions": [
+            { "friendly_name": "0 encerrar", "arguments": ["{{widgets.menu_l0.inbound.Body | strip}}"], "type": "equal_to", "value": "0" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.menu_l0.inbound.Body | strip}}", "offset": { "x": 0, "y": 420 } }
+    },
+    {
+      "name": "call_l1",
+      "type": "add-twiml-redirect",
+      "transitions": [
+        { "event": "return", "next": "send_l0_result" },
+        { "event": "timeout", "next": "send_l0_timeout" },
+        { "event": "fail", "next": "send_l0_fail" }
+      ],
+      "properties": {
+        "offset": { "x": -300, "y": 660 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/call?child=${L1_FLOW_SID}&caller={{flow.flow_sid}}&arg_canal=whatsapp&arg_origem=L0",
+        "timeout": "14400"
+      }
+    },
+    {
+      "name": "send_l0_result",
+      "type": "send-message",
+      "transitions": [{ "event": "sent" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": -300, "y": 900 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0 · Canais] De volta ao atendimento principal (profundidade {{widgets.call_l1.depth}}). Resultado da jornada: {{widgets.call_l1.result}} · produto={{widgets.call_l1.produto}} · voltou de {{widgets.call_l1.returned_from}}. Obrigado pelo contato!"
+      }
+    },
+    {
+      "name": "send_l0_unavailable",
+      "type": "send-message",
+      "transitions": [{ "event": "sent", "next": "menu_l0" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": 300, "y": 660 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Cartão não faz parte desta POC. Responda 1 para Investimentos."
+      }
+    },
+    {
+      "name": "send_l0_invalid",
+      "type": "send-message",
+      "transitions": [{ "event": "sent", "next": "menu_l0" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": 600, "y": 660 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Não entendi. Responda 1, 2 ou 0."
+      }
+    },
+    {
+      "name": "send_l0_bye",
+      "type": "send-message",
+      "transitions": [{ "event": "sent" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": 0, "y": 660 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Até logo!"
+      }
+    },
+    {
+      "name": "send_l0_timeout",
+      "type": "send-message",
+      "transitions": [{ "event": "sent" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": -600, "y": 900 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Sessão encerrada por inatividade. Mande qualquer mensagem para recomeçar."
+      }
+    },
+    {
+      "name": "send_l0_fail",
+      "type": "send-message",
+      "transitions": [{ "event": "sent" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": -900, "y": 900 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Falha ao chamar a camada Investimentos (redirect inválido). Veja os logs da Function /call."
+      }
+    }
+  ]
+}

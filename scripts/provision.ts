@@ -1,0 +1,294 @@
+/**
+ * Provision — one command from a fresh checkout (or post-teardown) to a
+ * rehearsable POC. The inverse of scripts/teardown.ts. Idempotent: every
+ * stage liveness-checks its id (GET) instead of trusting .env presence —
+ * stale ids linger after teardown/external cleanup on the shared account.
+ *
+ * Both scenarios' flows are always provisioned (cheap). The ONE thing that is
+ * scenario-specific is the sender's inbound wiring — a WhatsApp sender is
+ * either Messaging-webhooked (A) or Conversations-address-configured (B),
+ * never both — so `--scenario` flips that and records ACTIVE_SCENARIO.
+ *
+ * Stages:
+ *   1. Sync service + Map "stacks"                   → SYNC_SERVICE_SID
+ *   2. Functions deploy (twilio-run)                 → SERVERLESS_* / FRAME|CALL|RETURN_FUNCTION_SID
+ *      (first pass runs with the L0 SIDs blank — the flows need the domain first)
+ *   3. Flows, per scenario L3 → L2 → L1 → L0 (children first: a parent embeds its child's SID)
+ *      render → /Flows/Validate → create-or-update by friendly name → published
+ *   4. Functions env vars (Variables API — live, no redeploy)
+ *   5. Sender wiring for --scenario (sender webhook AND the Messaging Service inbound URL — the latter is what fires):
+ *        messaging     → Address Configuration DISABLED (if any) + both URLs → /inbound
+ *        conversations → Address Configuration ENABLED (autocreation → CONV L0) + both URLs → /noop
+ *                        (autocreation does NOT suppress the messaging webhook — both L0s answered otherwise)
+ *   6. Summary + the manual remainder
+ *
+ * Flags: --scenario messaging|conversations (default: messaging)
+ *        --skip-serverless (reuse the live service)   --skip-wiring
+ */
+import { execSync } from 'node:child_process';
+import { existsSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { deferServiceToSender, findAddressConfig, findSender, servicesHoldingSender, setMessagingServiceInbound, setSenderWebhook, upsertAddressConfig } from './lib/conversations.js';
+import {
+  alive,
+  api,
+  env,
+  ENV_PATH,
+  FLOWS,
+  log,
+  requireEnv,
+  SERVERLESS_DIR,
+  SERVERLESS_NAME,
+  setEnv,
+  SYNC_FRIENDLY_NAME,
+  type Scenario,
+} from './lib/env.js';
+import { renderFlow, upsertFlow, validateFlow } from './lib/studio.js';
+
+const SKIP_SERVERLESS = process.argv.includes('--skip-serverless');
+const SKIP_WIRING = process.argv.includes('--skip-wiring');
+const scenarioArg = process.argv.indexOf('--scenario');
+const SCENARIO: Scenario = scenarioArg > -1 && process.argv[scenarioArg + 1] === 'conversations' ? 'conversations' : 'messaging';
+
+if (!existsSync(ENV_PATH)) {
+  console.error('.env missing — cp .env.example .env and fill the shared block first (SETUP §2). Provision fills the ids.');
+  process.exit(1);
+}
+requireEnv('TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN', 'TWILIO_API_KEY', 'TWILIO_API_SECRET', 'TWILIO_WHATSAPP_NUMBER');
+
+// ── 1. Sync service + map ────────────────────────────────────────────────
+async function stageSync() {
+  const SYNC = 'https://sync.twilio.com/v1';
+  let sid = env('SYNC_SERVICE_SID');
+  if (sid && (await alive(`${SYNC}/Services/${sid}`))) log('1-sync', `service exists + alive: ${sid}`);
+  else {
+    if (sid) log('1-sync', `${sid} is DEAD — recreating.`);
+    const list = await api<{ services?: { sid: string; friendly_name: string }[] }>(`${SYNC}/Services?PageSize=100`);
+    const mine = (list.data.services ?? []).find((s) => s.friendly_name === SYNC_FRIENDLY_NAME);
+    if (mine) {
+      sid = mine.sid;
+      log('1-sync', `found existing by name: ${sid}`);
+    } else {
+      const res = await api<{ sid: string }>(`${SYNC}/Services`, { form: { FriendlyName: SYNC_FRIENDLY_NAME } });
+      if (!res.ok) throw new Error(`Sync service create ${res.status}: ${res.text.slice(0, 200)}`);
+      sid = res.data.sid;
+      log('1-sync', `created service ${sid}`);
+    }
+    setEnv('SYNC_SERVICE_SID', sid);
+  }
+  const mapName = env('SYNC_MAP_NAME') || 'stacks';
+  if (!env('SYNC_MAP_NAME')) setEnv('SYNC_MAP_NAME', mapName);
+  if (await alive(`${SYNC}/Services/${sid}/Maps/${mapName}`)) return log('1-sync', `map "${mapName}" exists.`);
+  const map = await api(`${SYNC}/Services/${sid}/Maps`, { form: { UniqueName: mapName } });
+  if (!map.ok) throw new Error(`Sync map create ${map.status}: ${map.text.slice(0, 200)}`);
+  log('1-sync', `created map "${mapName}"`);
+}
+
+// ── 2. Functions ─────────────────────────────────────────────────────────
+const SLS = 'https://serverless.twilio.com/v1';
+const KNOBS: [string, string][] = [
+  ['RESET_KEYWORD', 'reset'],
+  ['STACK_TTL_SECONDS', '14400'],
+  ['MAX_DEPTH', '8'],
+  ['END_CHILD_ON_RETURN', 'false'],
+];
+const allFlowSids = () => FLOWS.map((f) => env(f.envKey)).filter(Boolean).join(',');
+
+/** The Functions env file is DERIVED from the root .env — regenerated every run. */
+function writeServerlessEnv() {
+  const lines = [
+    '# GENERATED by scripts/provision.ts — edit the POC root .env instead.',
+    `ACCOUNT_SID=${env('TWILIO_ACCOUNT_SID')}`,
+    `AUTH_TOKEN=${env('TWILIO_AUTH_TOKEN')}`,
+    `SYNC_SERVICE_SID=${env('SYNC_SERVICE_SID')}`,
+    `SYNC_MAP_NAME=${env('SYNC_MAP_NAME') || 'stacks'}`,
+    `L0_FLOW_SID=${env('L0_FLOW_SID')}`,
+    `CONV_L0_FLOW_SID=${env('CONV_L0_FLOW_SID')}`,
+    `FLOW_SIDS=${allFlowSids()}`,
+    `CONVERSATIONS_SERVICE_SID=${env('CONVERSATIONS_SERVICE_SID')}`,
+    ...KNOBS.map(([k, d]) => `${k}=${env(k) || d}`),
+  ];
+  writeFileSync(join(SERVERLESS_DIR, '.env'), lines.join('\n') + '\n', { mode: 0o600 });
+}
+
+async function findService(): Promise<{ sid: string } | undefined> {
+  const res = await api<{ services?: { sid: string; unique_name: string }[] }>(`${SLS}/Services?PageSize=100`);
+  return (res.data.services ?? []).find((s) => s.unique_name === SERVERLESS_NAME);
+}
+
+async function captureServerlessIds(serviceSid: string) {
+  setEnv('SERVERLESS_SERVICE_SID', serviceSid);
+  const envs = await api<{ environments?: { sid: string; domain_name: string }[] }>(`${SLS}/Services/${serviceSid}/Environments`);
+  const e = envs.data.environments?.[0];
+  if (!e) throw new Error('service has no environment — did the deploy finish?');
+  setEnv('SERVERLESS_ENV_SID', e.sid);
+  setEnv('SERVERLESS_DOMAIN', e.domain_name);
+  const fns = await api<{ functions?: { sid: string; friendly_name: string }[] }>(`${SLS}/Services/${serviceSid}/Functions?PageSize=50`);
+  for (const [path, key] of [['/frame', 'FRAME_FUNCTION_SID'], ['/call', 'CALL_FUNCTION_SID'], ['/return', 'RETURN_FUNCTION_SID']] as const) {
+    const fn = (fns.data.functions ?? []).find((f) => f.friendly_name === path);
+    if (!fn) throw new Error(`${path} Function not found in the service`);
+    setEnv(key, fn.sid);
+  }
+}
+
+async function stageServerless() {
+  writeServerlessEnv();
+  const existing = await findService();
+  if (SKIP_SERVERLESS) {
+    if (!existing) throw new Error('--skip-serverless but no live service — drop the flag.');
+    log('2-functions', `skipped deploy (--skip-serverless); reusing ${existing.sid}`);
+    return captureServerlessIds(existing.sid);
+  }
+  // twilio-run pins the last deployed service SID in .twiliodeployinfo — after a
+  // teardown that file points at a ghost and the deploy 20404s.
+  if (!existing) rmSync(join(SERVERLESS_DIR, '.twiliodeployinfo'), { force: true });
+  if (!existsSync(join(SERVERLESS_DIR, 'node_modules'))) execSync('npm install', { cwd: SERVERLESS_DIR, stdio: 'inherit' });
+  log('2-functions', 'deploying (twilio-run) …');
+  execSync('npm run deploy', { cwd: SERVERLESS_DIR, stdio: 'inherit' });
+  const svc = await findService();
+  if (!svc) throw new Error(`service "${SERVERLESS_NAME}" not found after deploy`);
+  await captureServerlessIds(svc.sid);
+}
+
+// ── 3. Flows (both scenarios, children first) ────────────────────────────
+async function stageFlows() {
+  for (const spec of FLOWS) {
+    const vars: Record<string, string> = {
+      FN_DOMAIN: env('SERVERLESS_DOMAIN'),
+      SERVERLESS_SERVICE_SID: env('SERVERLESS_SERVICE_SID'),
+      SERVERLESS_ENV_SID: env('SERVERLESS_ENV_SID'),
+      FRAME_FUNCTION_SID: env('FRAME_FUNCTION_SID'),
+      CALL_FUNCTION_SID: env('CALL_FUNCTION_SID'),
+      RETURN_FUNCTION_SID: env('RETURN_FUNCTION_SID'),
+    };
+    for (const f of FLOWS) vars[f.envKey] = env(f.envKey);
+    const def = renderFlow(spec, vars);
+    if (!(await validateFlow(spec, def))) throw new Error(`${spec.key} failed /Flows/Validate — fix infra/studio/${spec.file}`);
+    setEnv(spec.envKey, await upsertFlow(spec, def, env(spec.envKey)));
+  }
+}
+
+// ── 4. Functions env vars (live) ─────────────────────────────────────────
+async function upsertVariable(key: string, value: string) {
+  const base = `${SLS}/Services/${env('SERVERLESS_SERVICE_SID')}/Environments/${env('SERVERLESS_ENV_SID')}/Variables`;
+  const list = await api<{ variables?: { sid: string; key: string; value: string }[] }>(`${base}?PageSize=100`);
+  const hit = (list.data.variables ?? []).find((v) => v.key === key);
+  if (hit?.value === value) return log('4-vars', `${key} already set.`);
+  if (!value && !hit) return;
+  const res = hit ? await api(`${base}/${hit.sid}`, { form: { Value: value } }) : await api(base, { form: { Key: key, Value: value } });
+  log('4-vars', `${key} → ${res.status}`);
+}
+
+async function stageVariables() {
+  await upsertVariable('L0_FLOW_SID', env('L0_FLOW_SID'));
+  await upsertVariable('CONV_L0_FLOW_SID', env('CONV_L0_FLOW_SID'));
+  await upsertVariable('FLOW_SIDS', allFlowSids());
+  await upsertVariable('CONVERSATIONS_SERVICE_SID', env('CONVERSATIONS_SERVICE_SID'));
+  for (const [k, d] of KNOBS) await upsertVariable(k, env(k) || d);
+  writeServerlessEnv(); // keep the file in step for later manual deploys
+}
+
+// ── 5. Sender wiring (the scenario flip) ─────────────────────────────────
+async function stageWiring() {
+  if (SKIP_WIRING) return log('5-wiring', 'skipped (--skip-wiring).');
+  const sender = await findSender();
+  if (!sender) throw new Error(`WhatsApp sender ${env('TWILIO_WHATSAPP_NUMBER')} not found on this account (Senders API v2).`);
+  setEnv('WHATSAPP_SENDER_SID', sender.sid);
+  const current = sender.webhook?.callback_url ?? '';
+  const inbound = `https://${env('SERVERLESS_DOMAIN')}/inbound`;
+  const cfg = await findAddressConfig();
+  // A pre-existing address configuration on this sender belongs to someone
+  // else (e.g. a Flex pilot) — remember what it pointed at so teardown can
+  // restore it instead of deleting it.
+  if (cfg && !env('PREVIOUS_ADDRESS_CONFIG_FLOW_SID') && cfg.auto_creation?.studio_flow_sid && !FLOWS.some((f) => env(f.envKey) === cfg.auto_creation?.studio_flow_sid)) {
+    setEnv('PREVIOUS_ADDRESS_CONFIG_FLOW_SID', cfg.auto_creation.studio_flow_sid);
+    setEnv('PREVIOUS_ADDRESS_CONFIG_ENABLED', String(cfg.auto_creation.enabled ?? false));
+  }
+
+  if (SCENARIO === 'messaging') {
+    if (cfg?.auto_creation?.enabled) {
+      // Autocreation takes precedence over the sender webhook — must be OFF for A.
+      const upd = await upsertAddressConfig(env('CONV_L0_FLOW_SID'), false);
+      log('5-wiring', `address configuration ${upd.sid} autocreation → DISABLED (scenario A)`);
+      setEnv('ADDRESS_CONFIG_SID', upd.sid);
+    } else log('5-wiring', 'no enabled address configuration — good for scenario A.');
+    if (current === inbound) log('5-wiring', 'sender inbound webhook already → /inbound');
+    else {
+      if (current && !env('PREVIOUS_SENDER_WEBHOOK') && !current.includes(env('SERVERLESS_DOMAIN'))) setEnv('PREVIOUS_SENDER_WEBHOOK', current);
+      log('5-wiring', `sender inbound webhook: ${current || '(none)'} → ${inbound} (${await setSenderWebhook(sender.sid, inbound)})`);
+    }
+    // A Messaging Service holding the sender routes inbound by ITS url unless it
+    // defers to the sender — the sender webhook above is ignored otherwise.
+    // Deferring alone does NOT work for a WhatsApp channel sender (verified
+    // live 2026-10-02 — see lib/conversations.ts): set the service's own
+    // inbound URL too, remembering the previous one for teardown.
+    const holders = await servicesHoldingSender(sender.sid);
+    if (!holders.length) log('5-wiring', 'sender is in no Messaging Service — the sender webhook is authoritative.');
+    for (const svc of holders) {
+      if (!svc.use_inbound_webhook_on_number) log('5-wiring', `messaging service ${svc.sid} (${svc.friendly_name}) → defer to sender webhook (${await deferServiceToSender(svc.sid)})`);
+      const msUrl = svc.inbound_request_url ?? '';
+      if (msUrl === inbound) {
+        log('5-wiring', `messaging service ${svc.sid} (${svc.friendly_name}) inbound already → /inbound`);
+        continue;
+      }
+      if (!env('MESSAGING_SERVICE_SID')) setEnv('MESSAGING_SERVICE_SID', svc.sid);
+      // (match on OUR domain, not on "/inbound" — the previous owner's dead URL ended in "/inbound-message")
+      if (msUrl && !env('PREVIOUS_MS_INBOUND_URL') && !msUrl.includes(env('SERVERLESS_DOMAIN'))) setEnv('PREVIOUS_MS_INBOUND_URL', msUrl);
+      log('5-wiring', `messaging service ${svc.sid} (${svc.friendly_name}) inbound: ${msUrl || '(none)'} → ${inbound} (${await setMessagingServiceInbound(svc.sid, inbound)})`);
+    }
+  } else {
+    const upd = await upsertAddressConfig(env('CONV_L0_FLOW_SID'), true);
+    setEnv('ADDRESS_CONFIG_SID', upd.sid);
+    log('5-wiring', `address configuration ${upd.sid}: autocreation → studio ${env('CONV_L0_FLOW_SID')} (ENABLED, scenario B)`);
+    // Autocreation does NOT suppress the messaging webhook (verified live
+    // 2026-10-02: both L0 flows answered one "oi"). Park the messaging path on
+    // /noop so only Conversations handles the message.
+    const noop = `https://${env('SERVERLESS_DOMAIN')}/noop`;
+    if (current === noop) log('5-wiring', 'sender inbound webhook already → /noop');
+    else {
+      if (current && !env('PREVIOUS_SENDER_WEBHOOK') && !current.includes(env('SERVERLESS_DOMAIN'))) setEnv('PREVIOUS_SENDER_WEBHOOK', current);
+      log('5-wiring', `sender inbound webhook: ${current || '(none)'} → ${noop} (${await setSenderWebhook(sender.sid, noop)})`);
+    }
+    for (const svc of await servicesHoldingSender(sender.sid)) {
+      const msUrl = svc.inbound_request_url ?? '';
+      if (msUrl === noop) {
+        log('5-wiring', `messaging service ${svc.sid} (${svc.friendly_name}) inbound already → /noop`);
+        continue;
+      }
+      if (!env('MESSAGING_SERVICE_SID')) setEnv('MESSAGING_SERVICE_SID', svc.sid);
+      if (msUrl && !env('PREVIOUS_MS_INBOUND_URL') && !msUrl.includes(env('SERVERLESS_DOMAIN'))) setEnv('PREVIOUS_MS_INBOUND_URL', msUrl);
+      log('5-wiring', `messaging service ${svc.sid} (${svc.friendly_name}) inbound: ${msUrl || '(none)'} → ${noop} (${await setMessagingServiceInbound(svc.sid, noop)})`);
+    }
+  }
+  setEnv('ACTIVE_SCENARIO', SCENARIO);
+}
+
+// ── 6. Summary ───────────────────────────────────────────────────────────
+function summary() {
+  console.log('\n═══ PROVISION SUMMARY ═══');
+  if (SKIP_WIRING) console.log(`  Sender wiring:   SKIPPED — sender still as before (ACTIVE_SCENARIO=${env('ACTIVE_SCENARIO') || 'none'}). Wire it: npm run provision -- --scenario <messaging|conversations> --skip-serverless`);
+  else console.log(`  Active scenario: ${SCENARIO}  (flip: npm run provision -- --scenario ${SCENARIO === 'messaging' ? 'conversations' : 'messaging'} --skip-serverless)`);
+  console.log(`  Functions:       https://${env('SERVERLESS_DOMAIN')}  (/inbound A · /call /return /frame both)`);
+  for (const f of FLOWS) console.log(`  ${f.key.padEnd(3)} ${f.scenario.padEnd(13)} ${env(f.envKey)}  ${f.name}`);
+  console.log(`  Sync service:    ${env('SYNC_SERVICE_SID')} / map "${env('SYNC_MAP_NAME')}"`);
+  console.log(`  Sender:          ${env('TWILIO_WHATSAPP_NUMBER')} (${env('WHATSAPP_SENDER_SID')})${SCENARIO === 'conversations' ? ` · address config ${env('ADDRESS_CONFIG_SID')}` : ''}`);
+  console.log('\nNext:');
+  console.log('  · npm run reset            (clean slate — chain FIRST before every rehearsal)');
+  console.log(`  · SETUP.md §6 smoke test   (scenario ${SCENARIO === 'messaging' ? 'A' : 'B'} transcript)`);
+  console.log('  · npm run trace            (cross-flow timeline of the last run) · npm run stack (live call stacks)');
+}
+
+(async () => {
+  console.log(`\n═══ studio-nested-flows PROVISION [--scenario ${SCENARIO}] ${SKIP_SERVERLESS ? '[--skip-serverless] ' : ''}${SKIP_WIRING ? '[--skip-wiring] ' : ''}═══\n`);
+  await stageSync();
+  await stageServerless();
+  await stageFlows();
+  await stageVariables();
+  await stageWiring();
+  summary();
+  console.log('\n✅ Provision complete.');
+})().catch((err) => {
+  console.error('\n[provision] Failed:', err.message || err);
+  console.error('Stages are idempotent — fix the cause and re-run; completed stages skip themselves.');
+  process.exit(1);
+});

@@ -1,0 +1,20 @@
+{
+  "name": "studio-nested-flows",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Twilio Functions for the studio-nested-flows POC: the messaging router (/inbound) and the Studio call stack (/call, /return, /frame) backed by a Sync Map.",
+  "scripts": {
+    "start": "twilio-run",
+    "deploy": "twilio-run deploy --override-existing-project"
+  },
+  "dependencies": {
+    "@twilio/runtime-handler": "2.0.0",
+    "twilio": "^5.0.3"
+  },
+  "devDependencies": {
+    "twilio-run": "^4.0.1"
+  },
+  "engines": {
+    "node": "22"
+  }
+}

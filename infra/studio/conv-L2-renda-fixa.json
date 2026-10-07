@@ -1,0 +1,197 @@
+{
+  "description": "nested-flows CONV L2 · Renda fixa (owner: Produtos RF). Scenario B. mode=entry → menu, calls L3 and ENDS. mode=return (L3 came back) → one Send Message then /return to L1 immediately — the level that exercises back-to-back replays (L3→L2→L1) on ONE customer message.",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingMessage" },
+        { "event": "incomingCall" },
+        { "event": "incomingConversationMessage", "next": "get_frame" },
+        { "event": "incomingRequest" },
+        { "event": "incomingParent" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+    {
+      "name": "get_frame",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success", "next": "split_mode" },
+        { "event": "fail", "next": "menu_l2" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 200 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${FRAME_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/frame",
+        "parameters": [{ "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" }]
+      }
+    },
+    {
+      "name": "split_mode",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "menu_l2" },
+        {
+          "event": "match",
+          "next": "send_l2_result",
+          "conditions": [
+            { "friendly_name": "return", "arguments": ["{{widgets.get_frame.parsed.mode}}"], "type": "equal_to", "value": "return" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.get_frame.parsed.mode}}", "offset": { "x": 0, "y": 400 } }
+    },
+    {
+      "name": "menu_l2",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "split_l2" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": 300, "y": 620 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L2 · Renda fixa · conv] Chamado por {{widgets.get_frame.parsed.parent}} · profundidade {{widgets.get_frame.parsed.depth}} · produto={{widgets.get_frame.parsed.args.produto}}\n1 - Simular rentabilidade (jornada)\n0 - Voltar",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "split_l2",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "menu_l2" },
+        {
+          "event": "match",
+          "next": "call_l3",
+          "conditions": [
+            { "friendly_name": "1 simular", "arguments": ["{{widgets.menu_l2.inbound.Body | strip}}"], "type": "equal_to", "value": "1" }
+          ]
+        },
+        {
+          "event": "match",
+          "next": "return_back",
+          "conditions": [
+            { "friendly_name": "0 voltar", "arguments": ["{{widgets.menu_l2.inbound.Body | strip}}"], "type": "equal_to", "value": "0" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.menu_l2.inbound.Body | strip}}", "offset": { "x": 300, "y": 840 } }
+    },
+    {
+      "name": "call_l3",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success" },
+        { "event": "fail", "next": "return_fail" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${CALL_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/call",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "child", "value": "${CONV_L3_FLOW_SID}" },
+          { "key": "caller", "value": "{{flow.flow_sid}}" },
+          { "key": "arg_produto", "value": "{{widgets.get_frame.parsed.args.produto}}" },
+          { "key": "arg_indexador", "value": "CDI" },
+          { "key": "arg_taxa", "value": "112" }
+        ]
+      }
+    },
+    {
+      "name": "send_l2_result",
+      "type": "send-message",
+      "transitions": [
+        { "event": "sent", "next": "return_done" },
+        { "event": "failed", "next": "return_done" }
+      ],
+      "properties": {
+        "offset": { "x": -300, "y": 620 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L2 · Renda fixa · conv] Jornada concluída: {{widgets.get_frame.parsed.result}} (profundidade agora {{widgets.get_frame.parsed.depth}}). Devolvendo para Investimentos…"
+      }
+    },
+    {
+      "name": "return_done",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": -300, "y": 840 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "{{widgets.get_frame.parsed.result}}" },
+          { "key": "produto", "value": "{{widgets.get_frame.parsed.produto}}" },
+          { "key": "via", "value": "L2" }
+        ]
+      }
+    },
+    {
+      "name": "return_back",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 600, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "voltou_de_L2" },
+          { "key": "via", "value": "L2" }
+        ]
+      }
+    },
+    {
+      "name": "return_timeout",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 900, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "timeout_L2" },
+          { "key": "via", "value": "L2" }
+        ]
+      }
+    },
+    {
+      "name": "return_fail",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 1200, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "fail_L2" },
+          { "key": "via", "value": "L2" }
+        ]
+      }
+    }
+  ]
+}

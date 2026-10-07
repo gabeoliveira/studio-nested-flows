@@ -1,0 +1,90 @@
+{
+  "description": "nested-flows L3 · Jornada: simulação de rentabilidade (owner: Jornadas). The leaf — the 'actual bot' the orchestration layers lead to. Reads args (produto/indexador/taxa) from its frame, asks one question, computes in Liquid, returns result + produto to L2.",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingMessage", "next": "get_frame" },
+        { "event": "incomingCall" },
+        { "event": "incomingConversationMessage" },
+        { "event": "incomingRequest" },
+        { "event": "incomingParent" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+    {
+      "name": "get_frame",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success", "next": "ask_amount" },
+        { "event": "fail", "next": "ask_amount" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 200 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${FRAME_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/frame",
+        "parameters": [{ "key": "address", "value": "{{contact.channel.address}}" }]
+      }
+    },
+    {
+      "name": "ask_amount",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "send_l3_result" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 420 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L3 · Jornada rentabilidade] Chamado por {{widgets.get_frame.parsed.parent}} · profundidade {{widgets.get_frame.parsed.depth}} · produto={{widgets.get_frame.parsed.args.produto}} · {{widgets.get_frame.parsed.args.taxa}}% do {{widgets.get_frame.parsed.args.indexador}}\nQual valor você quer simular? (só números, ex: 10000)",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "send_l3_result",
+      "type": "send-message",
+      "transitions": [
+        { "event": "sent", "next": "return_done" },
+        { "event": "failed", "next": "return_done" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 640 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L3 · Jornada] R$ {{widgets.ask_amount.inbound.Body | strip}} a {{widgets.get_frame.parsed.args.taxa}}% do {{widgets.get_frame.parsed.args.indexador}} ≈ R$ {{widgets.ask_amount.inbound.Body | strip | times: 1.1288 | round: 2}} em 12 meses. Devolvendo para Renda fixa…"
+      }
+    },
+    {
+      "name": "return_done",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 0, "y": 860 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result={{widgets.ask_amount.inbound.Body | strip | times: 1.1288 | round: 2}}&produto={{widgets.get_frame.parsed.args.produto}}&via=L3",
+        "timeout": "0"
+      }
+    },
+    {
+      "name": "return_timeout",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 300, "y": 640 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result=timeout_L3&via=L3",
+        "timeout": "0"
+      }
+    }
+  ]
+}

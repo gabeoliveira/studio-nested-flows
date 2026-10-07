@@ -1,0 +1,196 @@
+{
+  "description": "nested-flows CONV L0 · Front door (owner: Canais). Scenario B — Conversations Classic. Entry via the sender's Address Configuration (autocreation → this flow). Reads /frame first: mode=entry → menu; mode=return → the post-call point. Calls L1 via Run Function /call and ENDS (no parking). Never edits L1 — it only knows L1's SID.",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingMessage" },
+        { "event": "incomingCall" },
+        { "event": "incomingConversationMessage", "next": "get_frame" },
+        { "event": "incomingRequest" },
+        { "event": "incomingParent" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+    {
+      "name": "get_frame",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success", "next": "split_mode" },
+        { "event": "fail", "next": "menu_l0" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 200 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${FRAME_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/frame",
+        "parameters": [{ "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" }]
+      }
+    },
+    {
+      "name": "split_mode",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "menu_l0" },
+        {
+          "event": "match",
+          "next": "send_l0_result",
+          "conditions": [
+            { "friendly_name": "return", "arguments": ["{{widgets.get_frame.parsed.mode}}"], "type": "equal_to", "value": "return" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.get_frame.parsed.mode}}", "offset": { "x": 0, "y": 400 } }
+    },
+    {
+      "name": "menu_l0",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "split_l0" },
+        { "event": "timeout", "next": "send_l0_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": 300, "y": 620 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L0 · Canais · conv] Olá! Sou o assistente virtual do banco. O que você precisa?\n1 - Investimentos\n2 - Cartão\n0 - Encerrar",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "split_l0",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "send_l0_invalid" },
+        {
+          "event": "match",
+          "next": "call_l1",
+          "conditions": [
+            { "friendly_name": "1 investimentos", "arguments": ["{{widgets.menu_l0.inbound.Body | strip}}"], "type": "equal_to", "value": "1" }
+          ]
+        },
+        {
+          "event": "match",
+          "next": "send_l0_unavailable",
+          "conditions": [
+            { "friendly_name": "2 cartao", "arguments": ["{{widgets.menu_l0.inbound.Body | strip}}"], "type": "equal_to", "value": "2" }
+          ]
+        },
+        {
+          "event": "match",
+          "next": "send_l0_bye",
+          "conditions": [
+            { "friendly_name": "0 encerrar", "arguments": ["{{widgets.menu_l0.inbound.Body | strip}}"], "type": "equal_to", "value": "0" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.menu_l0.inbound.Body | strip}}", "offset": { "x": 300, "y": 840 } }
+    },
+    {
+      "name": "call_l1",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success" },
+        { "event": "fail", "next": "send_l0_fail" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 1080 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${CALL_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/call",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "child", "value": "${CONV_L1_FLOW_SID}" },
+          { "key": "caller", "value": "{{flow.flow_sid}}" },
+          { "key": "arg_canal", "value": "whatsapp" },
+          { "key": "arg_origem", "value": "L0" }
+        ]
+      }
+    },
+    {
+      "name": "send_l0_result",
+      "type": "send-message",
+      "transitions": [{ "event": "sent" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": -300, "y": 620 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0 · Canais · conv] De volta ao atendimento principal (profundidade {{widgets.get_frame.parsed.depth}}). Resultado da jornada: {{widgets.get_frame.parsed.result}} · produto={{widgets.get_frame.parsed.produto}} · voltou de {{widgets.get_frame.parsed.from}}. Obrigado pelo contato!"
+      }
+    },
+    {
+      "name": "send_l0_unavailable",
+      "type": "send-message",
+      "transitions": [{ "event": "sent", "next": "menu_l0" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": 600, "y": 1080 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Cartão não faz parte desta POC. Responda 1 para Investimentos."
+      }
+    },
+    {
+      "name": "send_l0_invalid",
+      "type": "send-message",
+      "transitions": [{ "event": "sent", "next": "menu_l0" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": 900, "y": 1080 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Não entendi. Responda 1, 2 ou 0."
+      }
+    },
+    {
+      "name": "send_l0_bye",
+      "type": "send-message",
+      "transitions": [{ "event": "sent" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": 300, "y": 1080 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Até logo!"
+      }
+    },
+    {
+      "name": "send_l0_timeout",
+      "type": "send-message",
+      "transitions": [{ "event": "sent" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": 600, "y": 840 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Sessão encerrada por inatividade. Mande qualquer mensagem para recomeçar."
+      }
+    },
+    {
+      "name": "send_l0_fail",
+      "type": "send-message",
+      "transitions": [{ "event": "sent" }, { "event": "failed" }],
+      "properties": {
+        "offset": { "x": -300, "y": 1080 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L0] Falha ao chamar a camada Investimentos (/call falhou). Veja os logs da Function."
+      }
+    }
+  ]
+}

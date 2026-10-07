@@ -1,0 +1,149 @@
+{
+  "description": "nested-flows L2 · Renda fixa (owner: Produtos RF). Called by L1. Calls L3 (the actual journey) and returns IMMEDIATELY after the child returns (Send Message, no wait) — this is the level that exercises the chained-redirect unwind L3→/return→L2→/return→L1 inside ONE inbound message.",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingMessage", "next": "get_frame" },
+        { "event": "incomingCall" },
+        { "event": "incomingConversationMessage" },
+        { "event": "incomingRequest" },
+        { "event": "incomingParent" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+    {
+      "name": "get_frame",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success", "next": "menu_l2" },
+        { "event": "fail", "next": "menu_l2" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 200 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${FRAME_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/frame",
+        "parameters": [{ "key": "address", "value": "{{contact.channel.address}}" }]
+      }
+    },
+    {
+      "name": "menu_l2",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "split_l2" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 420 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L2 · Renda fixa] Chamado por {{widgets.get_frame.parsed.parent}} · profundidade {{widgets.get_frame.parsed.depth}} · produto={{widgets.get_frame.parsed.args.produto}}\n1 - Simular rentabilidade (jornada)\n0 - Voltar",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "split_l2",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "menu_l2" },
+        {
+          "event": "match",
+          "next": "call_l3",
+          "conditions": [
+            { "friendly_name": "1 simular", "arguments": ["{{widgets.menu_l2.inbound.Body | strip}}"], "type": "equal_to", "value": "1" }
+          ]
+        },
+        {
+          "event": "match",
+          "next": "return_back",
+          "conditions": [
+            { "friendly_name": "0 voltar", "arguments": ["{{widgets.menu_l2.inbound.Body | strip}}"], "type": "equal_to", "value": "0" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.menu_l2.inbound.Body | strip}}", "offset": { "x": 0, "y": 640 } }
+    },
+    {
+      "name": "call_l3",
+      "type": "add-twiml-redirect",
+      "transitions": [
+        { "event": "return", "next": "send_l2_result" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "fail", "next": "return_fail" }
+      ],
+      "properties": {
+        "offset": { "x": -300, "y": 880 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/call?child=${L3_FLOW_SID}&caller={{flow.flow_sid}}&arg_produto={{widgets.get_frame.parsed.args.produto}}&arg_indexador=CDI&arg_taxa=112",
+        "timeout": "14400"
+      }
+    },
+    {
+      "name": "send_l2_result",
+      "type": "send-message",
+      "transitions": [
+        { "event": "sent", "next": "return_done" },
+        { "event": "failed", "next": "return_done" }
+      ],
+      "properties": {
+        "offset": { "x": -300, "y": 1120 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L2 · Renda fixa] Jornada concluída: {{widgets.call_l3.result}} (profundidade agora {{widgets.call_l3.depth}}). Devolvendo para Investimentos…"
+      }
+    },
+    {
+      "name": "return_done",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": -300, "y": 1340 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result={{widgets.call_l3.result}}&produto={{widgets.call_l3.produto}}&via=L2",
+        "timeout": "0"
+      }
+    },
+    {
+      "name": "return_back",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 300, "y": 880 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result=voltou_de_L2&via=L2",
+        "timeout": "0"
+      }
+    },
+    {
+      "name": "return_timeout",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 600, "y": 880 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result=timeout_L2&via=L2",
+        "timeout": "0"
+      }
+    },
+    {
+      "name": "return_fail",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 900, "y": 880 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result=fail_L2&via=L2",
+        "timeout": "0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,103 @@
+{
+  "description": "nested-flows CONV L3 · Jornada: simulação de rentabilidade (owner: Jornadas). Scenario B leaf — the 'actual bot'. Reads args from /frame, asks one question, computes in Liquid, /returns result + produto to L2 and ENDS.",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingMessage" },
+        { "event": "incomingCall" },
+        { "event": "incomingConversationMessage", "next": "get_frame" },
+        { "event": "incomingRequest" },
+        { "event": "incomingParent" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+    {
+      "name": "get_frame",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success", "next": "ask_amount" },
+        { "event": "fail", "next": "ask_amount" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 200 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${FRAME_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/frame",
+        "parameters": [{ "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" }]
+      }
+    },
+    {
+      "name": "ask_amount",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "send_l3_result" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 420 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L3 · Jornada rentabilidade · conv] Chamado por {{widgets.get_frame.parsed.parent}} · profundidade {{widgets.get_frame.parsed.depth}} · produto={{widgets.get_frame.parsed.args.produto}} · {{widgets.get_frame.parsed.args.taxa}}% do {{widgets.get_frame.parsed.args.indexador}}\nQual valor você quer simular? (só números, ex: 10000)",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "send_l3_result",
+      "type": "send-message",
+      "transitions": [
+        { "event": "sent", "next": "return_done" },
+        { "event": "failed", "next": "return_done" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 640 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "to": "{{contact.channel.address}}",
+        "body": "[L3 · Jornada · conv] R$ {{widgets.ask_amount.inbound.Body | strip}} a {{widgets.get_frame.parsed.args.taxa}}% do {{widgets.get_frame.parsed.args.indexador}} ≈ R$ {{widgets.ask_amount.inbound.Body | strip | times: 1.1288 | round: 2}} em 12 meses. Devolvendo para Renda fixa…"
+      }
+    },
+    {
+      "name": "return_done",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 0, "y": 860 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "{{widgets.ask_amount.inbound.Body | strip | times: 1.1288 | round: 2}}" },
+          { "key": "produto", "value": "{{widgets.get_frame.parsed.args.produto}}" },
+          { "key": "via", "value": "L3" }
+        ]
+      }
+    },
+    {
+      "name": "return_timeout",
+      "type": "run-function",
+      "transitions": [{ "event": "success" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 300, "y": 640 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${RETURN_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/return",
+        "parameters": [
+          { "key": "conversationSid", "value": "{{trigger.conversation.ConversationSid}}" },
+          { "key": "result", "value": "timeout_L3" },
+          { "key": "via", "value": "L3" }
+        ]
+      }
+    }
+  ]
+}

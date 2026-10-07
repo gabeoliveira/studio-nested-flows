@@ -1,0 +1,165 @@
+{
+  "description": "nested-flows L1 · Investimentos (owner: BU Investimentos). Called by L0. Reads its frame (/frame), offers products, calls L2 (Renda fixa) and — after the child returns — asks whether to continue (a Send & Wait between child return and own return, i.e. the unwind chain is BROKEN here on purpose). Returns to L0 through /return.",
+  "initial_state": "Trigger",
+  "flags": { "allow_concurrent_calls": true },
+  "states": [
+    {
+      "name": "Trigger",
+      "type": "trigger",
+      "transitions": [
+        { "event": "incomingMessage", "next": "get_frame" },
+        { "event": "incomingCall" },
+        { "event": "incomingConversationMessage" },
+        { "event": "incomingRequest" },
+        { "event": "incomingParent" }
+      ],
+      "properties": { "offset": { "x": 0, "y": 0 } }
+    },
+    {
+      "name": "get_frame",
+      "type": "run-function",
+      "transitions": [
+        { "event": "success", "next": "menu_l1" },
+        { "event": "fail", "next": "menu_l1" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 200 },
+        "service_sid": "${SERVERLESS_SERVICE_SID}",
+        "environment_sid": "${SERVERLESS_ENV_SID}",
+        "function_sid": "${FRAME_FUNCTION_SID}",
+        "url": "https://${FN_DOMAIN}/frame",
+        "parameters": [{ "key": "address", "value": "{{contact.channel.address}}" }]
+      }
+    },
+    {
+      "name": "menu_l1",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "split_l1" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": 0, "y": 420 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L1 · Investimentos] Chamado por {{widgets.get_frame.parsed.parent}} · profundidade {{widgets.get_frame.parsed.depth}} · canal={{widgets.get_frame.parsed.args.canal}}\nQual produto?\n1 - Renda fixa\n2 - Fundos (indisponível)\n0 - Voltar",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "split_l1",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "menu_l1" },
+        {
+          "event": "match",
+          "next": "call_l2",
+          "conditions": [
+            { "friendly_name": "1 renda fixa", "arguments": ["{{widgets.menu_l1.inbound.Body | strip}}"], "type": "equal_to", "value": "1" }
+          ]
+        },
+        {
+          "event": "match",
+          "next": "return_back",
+          "conditions": [
+            { "friendly_name": "0 voltar", "arguments": ["{{widgets.menu_l1.inbound.Body | strip}}"], "type": "equal_to", "value": "0" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.menu_l1.inbound.Body | strip}}", "offset": { "x": 0, "y": 640 } }
+    },
+    {
+      "name": "call_l2",
+      "type": "add-twiml-redirect",
+      "transitions": [
+        { "event": "return", "next": "ask_more" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "fail", "next": "return_fail" }
+      ],
+      "properties": {
+        "offset": { "x": -300, "y": 880 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/call?child=${L2_FLOW_SID}&caller={{flow.flow_sid}}&arg_canal={{widgets.get_frame.parsed.args.canal}}&arg_produto=renda_fixa",
+        "timeout": "14400"
+      }
+    },
+    {
+      "name": "ask_more",
+      "type": "send-and-wait-for-reply",
+      "transitions": [
+        { "event": "incomingMessage", "next": "split_more" },
+        { "event": "timeout", "next": "return_timeout" },
+        { "event": "deliveryFailure" }
+      ],
+      "properties": {
+        "offset": { "x": -300, "y": 1120 },
+        "service": "{{trigger.message.InstanceSid}}",
+        "channel": "{{trigger.message.ChannelSid}}",
+        "from": "{{flow.channel.address}}",
+        "body": "[L1 · Investimentos] Renda fixa retornou: {{widgets.call_l2.result}} (profundidade agora {{widgets.call_l2.depth}}). Quer consultar outro produto? (sim/não)",
+        "timeout": "3600"
+      }
+    },
+    {
+      "name": "split_more",
+      "type": "split-based-on",
+      "transitions": [
+        { "event": "noMatch", "next": "return_done" },
+        {
+          "event": "match",
+          "next": "menu_l1",
+          "conditions": [
+            { "friendly_name": "sim", "arguments": ["{{widgets.ask_more.inbound.Body | downcase | strip}}"], "type": "equal_to", "value": "sim" }
+          ]
+        }
+      ],
+      "properties": { "input": "{{widgets.ask_more.inbound.Body | downcase | strip}}", "offset": { "x": -300, "y": 1340 } }
+    },
+    {
+      "name": "return_done",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": -300, "y": 1560 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result={{widgets.call_l2.result}}&produto={{widgets.call_l2.produto}}&via=L1",
+        "timeout": "0"
+      }
+    },
+    {
+      "name": "return_back",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 300, "y": 880 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result=voltou_de_L1&via=L1",
+        "timeout": "0"
+      }
+    },
+    {
+      "name": "return_timeout",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 600, "y": 880 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result=timeout_L1&via=L1",
+        "timeout": "0"
+      }
+    },
+    {
+      "name": "return_fail",
+      "type": "add-twiml-redirect",
+      "transitions": [{ "event": "return" }, { "event": "timeout" }, { "event": "fail" }],
+      "properties": {
+        "offset": { "x": 900, "y": 880 },
+        "method": "POST",
+        "url": "https://${FN_DOMAIN}/return?result=fail_L1&via=L1",
+        "timeout": "0"
+      }
+    }
+  ]
+}
